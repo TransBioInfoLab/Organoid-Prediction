@@ -24,7 +24,7 @@ This study presents an innovative methodology for predicting chemotherapy respon
 
 ## For Reproducible Research
 
-Install all the R packages from the load_package.R file.
+Install all the R packages from the `load_package.R` file.
 
 The platform information is:
 
