@@ -22,7 +22,7 @@ This study presents an innovative methodology for predicting chemotherapy respon
 | code/utility            | Functions used for analysis                        |
 | results                 | Genes in consensus WGCNA key modules               |
 
-## For reproducible research
+## For Reproducible Research
 
 Install all the R packages from the load_package.R file.
 
