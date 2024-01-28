@@ -22,3 +22,27 @@ This study presents an innovative methodology for predicting chemotherapy respon
 | code/utility            | Functions used for analysis                        |
 | results                 | Genes in consensus WGCNA key modules               |
 
+## For reproducible research
+
+Install all the R packages from the load_package.R file.
+
+The platform information is:
+
+```R
+# For reproducible research, please install the following R packages 
+# and make sure the R and BiocManager versions are correct
+# Session Info ----------------------------------------------------------------------------------------------
+# setting  value 
+# version  R version 4.3.1 (2023-06-16)
+# os       macOS Sonoma 14.3
+# system   x86_64, darwin20
+# ui       RStudio
+# language (EN)
+# collate  en_US.UTF-8
+# ctype    en_US.UTF-8
+# tz       America/New_York
+# date     2024-01-27
+# rstudio  2023.09.1+494 Desert Sunflower (desktop)
+# pandoc   3.1.6.1 @ /usr/local/bin/ (via rmarkdown)
+```
+
