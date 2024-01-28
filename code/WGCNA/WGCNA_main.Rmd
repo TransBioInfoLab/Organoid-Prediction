@@ -1,0 +1,232 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "WGCNA --- Main model"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE, message = F)
+
+dir.base <- "../../"
+# Create and retrieve dir
+dir.data <- file.path(dir.base, "data/")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+dir.results.wgcna <- file.path(dir.results, "WGCNA/")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Load data
+
+```{r}
+train_df <- prepare_train_df()
+exp_top_genes <- train_df$exps_ls
+```
+
+```{r}
+# Creat exp set
+expSet <- list(
+  GSE171680 = list(data = scale(t(exp_top_genes$GSE171680))),
+  GSE171681 = list(data = scale(t(exp_top_genes$GSE171681))),
+  GSE64392 = list(data = scale(t(exp_top_genes$GSE64392)))
+)
+checkSets(expSet)
+```
+
+# WGCNA
+
+```{r}
+powers = 2:20
+
+# Call the network topology analysis function
+sft1 = pickSoftThreshold(
+  expSet$GSE171680$data,            
+  blockSize = 30,
+  powerVector = powers,
+  networkType = "signed",
+  verbose = 5
+  )
+
+sft2 = pickSoftThreshold(
+  expSet$GSE171681$data,             
+  blockSize = 30,
+  powerVector = powers,
+  networkType = "signed",
+  verbose = 5
+  )
+
+sft3 = pickSoftThreshold(
+  expSet$GSE64392$data,             
+  blockSize = 30,
+  powerVector = powers,
+  networkType = "signed",
+  verbose = 5
+  )
+```
+
+```{r eval = F}
+modules <- blockwiseConsensusModules(
+  multiExpr = expSet,
+  power = 12, 
+  networkType = "signed",
+  TOMType = "signed",
+  TOMDenom = "mean",
+  networkCalibration = "full quantile",
+  detectCutHeight = 0.999,
+  minModuleSize = 30,
+  saveConsensusTOMs = T,
+  saveIndividualTOMs = T
+)
+```
+
+# Identification of key module
+
+## Find eigen modules that most related to outcome
+
+```{r}
+# Prepare survival data
+GSE171682c <- train_df$survival
+```
+
+```{r}
+# RFS
+rfs_results <- cox_coef(modules$multiMEs$GSE171680$data %>% t(),
+                        GSE171682c,
+                        time_var = "rfs_month",
+                        event_var = "recur")
+```
+
+```{r}
+rfs_results %>% arrange(pr_z)
+```
+
+```{r}
+## OS
+cox_results_os <- cox_coef(modules$multiMEs$GSE171680$data %>% t(),
+                        GSE171682c,
+                        time_var = "os_month",
+                        event_var = "death")
+```
+
+```{r}
+cox_results_os %>% arrange(pr_z)
+```
+
+```{r}
+## Corr
+ls <- plyr::ldply(
+  1:ncol(modules$multiMEs$GSE171680$data),
+  .fun = function(i){
+    cr <- cor.test(modules$multiMEs$GSE171680$data[,i],
+                   modules$multiMEs$GSE171681$data[,i], method = "spearman")
+    data.frame(cor = cr$estimate, p = cr$p.value, method = "Spearman")
+  }
+)
+rownames(ls) <- gsub("ME", "", colnames(modules$multiMEs$GSE171680$data))
+```
+
+## Calculate consensus kME
+
+```{r}
+kME <- consensusKME(
+  multiExpr = expSet,
+  moduleLabels = modules$colors,
+  multiEigengenes = modules$multiMEs
+)
+```
+
+
+```{r eval = F}
+# Save WGCNA modules and hub genes
+save(
+  modules,
+  exp_top_genes,
+  kME,
+  cox_results,
+  cox_results_os,
+  corr_results,
+  file = file.path(dir.results.wgcna,"WGCNA_GSE171682_GSE64392_results.rda")
+)
+```
+
+# Select hub genes in key modules
+
+```{r}
+load(file.path(dir.results.wgcna,"WGCNA_GSE171682_GSE64392_results.rda"))
+```
+
+```{r}
+module_wo_grey <- modules$colors[!modules$colors %in% "grey"]
+table(module_wo_grey)
+```
+
+```{r}
+module_wo_grey_ls <- plyr::llply(
+  unique(module_wo_grey),
+  .fun = function(m){
+    data.frame(gene = names(module_wo_grey[module_wo_grey == m]))
+  }
+)
+names(module_wo_grey_ls) <- unique(module_wo_grey)
+```
+
+```{r}
+writexl::write_xlsx(
+  module_wo_grey_ls,
+  file.path(dir.results.wgcna, "modules_from_wgcna.xlsx")
+)
+```
+
+criteria
+
+1) MM > 0.4
+2) consistent in drug and os response 
+3) ME p value < 0.05 in drug correlation 
+4) significant in gene-drug correlation
+
+```{r }
+hub_gene_in_modules_drug <- get_top_genes_in_module(
+ module_wo_grey, kME,
+ thres_kME = 0.5
+)
+hub_gene_in_modules_drug <- hub_gene_in_modules_drug[hub_gene_in_modules_drug %>% 
+                       purrr::map(~nrow(.) > 1) %>% 
+                       unlist()]
+```
+
+```{r eval = F}
+save(
+  hub_gene_in_modules_drug,
+  file = file.path(dir.results.wgcna, "WGCNA_key_modules_corr_pairs.rda")
+)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+

@@ -1,0 +1,126 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "GSE39582"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE, eval = F)
+
+dir.base <- "../../../"
+# Create and retrieve dir
+GEO <- "GSE39582"
+dir.data <- file.path(dir.base, "data/", GEO)
+dir.data.raw <- file.path(dir.data, "raw")
+dir.data.processed <- file.path(dir.data, "processed")
+dir.data.clinical <- file.path(dir.data, "clinical")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Data preprocessing
+
+## Data download and get expression data
+
+```{r eval = F}
+# Gene expression profile of colorectal cancer tissues from 87 patients
+GSE39582 <- getGEO(GEO = "GSE39582", destdir = dir.data.raw)
+```
+
+```{r}
+# Get phenotype
+pheno_GSE39582 <- pData(GSE39582$GSE39582_series_matrix.txt.gz) %>%
+  clean_names()
+
+write_csv(
+  pheno_GSE39582,
+  file.path(dir.data.clinical, "GSE39582_clinical_data.csv")
+)
+```
+
+## Get expression data
+
+```{r}
+exp <- exprs(GSE39582$GSE39582_series_matrix.txt.gz)
+
+#### use probe with largest IDR to represent the gene
+arrayIQR <- apply(exp,1,IQR)
+probe <- rownames(exp)
+uniqueGenes <- findLargest(as.vector(probe),arrayIQR,'hgu133plus2')
+
+# annotation with gene symbol
+exp2 <- exp[uniqueGenes,]
+gene_symbol <- AnnotationDbi::select(hgu133plus2.db, 
+                                     keys = uniqueGenes, 
+                                     columns ="SYMBOL")
+rownames(exp2) <- gene_symbol$SYMBOL
+
+# Save raw expression data
+write_csv(
+  exp2 %>% data.frame() %>% rownames_to_column("Gene"),
+  file.path(dir.data.processed, paste0(GEO, "_raw_exp_data.csv"))
+)
+```
+
+## Preprocessing on clinical data
+
+```{r}
+clinical <- pheno_GSE39582[,c(2,80:112)]
+
+# Select colon cancer samples with drug type information 
+clinical <- clinical %>%
+  filter(dataset_ch1 != "Non Tumoral" & 
+         chemotherapy_adjuvant_type_ch1 != "N/A")
+
+write_csv(
+  clinical,
+  file.path(dir.data.clinical, "GSE39582_clinical_data_CC_with_drug_info.csv")
+)
+```
+
+## Match with expression data
+
+```{r}
+exp2 <- exp2[,clinical$geo_accession]
+
+write_csv(
+  exp2 %>% data.frame() %>% rownames_to_column("Gene"),
+  file.path(dir.data.processed, paste0(GEO, "_CC_exp_data.csv"))
+)
+```
+
+```{r}
+save(
+  exp2,
+  clinical,
+  file = file.path(dir.data.processed, "GSE39582_CC_with_drug_info_matched_exp_clinical_data.rda")
+)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+

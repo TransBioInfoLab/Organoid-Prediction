@@ -1,0 +1,254 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "Association tests"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+dir.base <- "../../"
+# Create and retrieve dir
+dir.data <- file.path(dir.base, "data/")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+dir.results.cox <- file.path(dir.results, "cox_reg/")
+dir.results.corr <- file.path(dir.results, "corr/")
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Load results
+
+```{r}
+# Load correlation results
+cor_results <- read.csv(
+  file.path(dir.results.corr, "GSE171682_colorectal_cancer_gene_spearman_corr.csv")
+)
+```
+
+```{r}
+cox_os <- read.csv(
+  file.path(dir.results.cox, "GSE171682/GSE171682_colorectal_cancer_gene_cox_regression_os.csv")
+)
+```
+
+```{r}
+gene_drug_corr <- read.csv(
+  file.path(dir.results.corr, "GSE64392_gene_drug_corr.csv")
+)
+```
+
+```{r echo = F}
+# Select common genes
+common_genes <- intersect(cor_results$gene, 
+                          intersect(cox_os$gene, gene_drug_corr$gene))
+
+colnames(cor_results)[-1] <- paste0("gene_pair_corr_", colnames(cor_results)[-1])
+colnames(cox_os)[-1] <- paste0("os_", colnames(cox_os)[-1])
+colnames(gene_drug_corr)[-1] <- paste0("gene_drug_corr_", colnames(gene_drug_corr)[-1])
+```
+
+# Significant gene pair correlation
+
+```{r}
+df <- inner_join(inner_join(gene_drug_corr, cor_results), cox_os)
+df_select <- df %>% filter(os_tissues_pr_z < 0.05, gene_drug_corr_p.value < 0.05, gene_pair_corr_p_value < 0.05)
+```
+
+## Train organoid models
+
+```{r}
+exp_list <- prepare_single_train_df("GSE64392", quantile_keep = 0)
+```
+
+```{r}
+test_GEO <- c(
+  "GSE39582",
+  "GSE17538",
+  "COAD", #TCGA
+  "GSE106584",
+  "GSE72970",
+  "GSE87211"
+)
+```
+
+```{r}
+# Get selected genes
+selected_genes <- df_select$gene
+
+# RF model
+rf1 <- fit_rf(gene_select = selected_genes,
+             exp = exp_list$exp,
+             y = exp_list$clinical$mIC50,
+             mode = "VIMP",
+             seed = 954)
+
+
+# Ridge regression
+set.seed(954)
+ridge <- fit_ridge(
+  gene_select = selected_genes,
+   exp = exp_list$exp,
+   y = exp_list$clinical$mIC50,
+)
+
+# Ensemble
+set.seed(954)
+ridge2 <- fit_ridge(
+  gene_select = gsub("[.]", "-", colnames(rf1$xvar)),
+   exp = exp_list$exp,
+   y = exp_list$clinical$mIC50,
+  a = 0
+)
+```
+
+## Test model
+
+```{r}
+results <- plyr::ldply(
+  test_GEO,
+  .fun = function(geo){
+    
+    cat("Testing GEO: ", geo, "\n")
+    # Prepare testing df
+    test_ls <- prepare_test_df(geo)
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge1_results <- prepare_results(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls
+    )
+    
+    ## Ensemble
+    cat("Ridge Test\n")
+    ridge2_results <- prepare_results(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls
+    )
+    
+    ## RF test
+    cat("RF1 Test\n")
+    rf1_results <- prepare_results(
+      model = "RF",
+      mod = rf1,
+      test_list = test_ls
+    )
+
+    results_df <- rbind(
+      ridge1_results, ridge2_results, rf2_results
+    ) %>% 
+      mutate(Model = c("ridge","ensemble","RF"),
+             GEO = geo,
+             gene_select_criteria = "Three association test",
+             .before = 1)
+    
+    return(results_df)
+  }
+)
+```
+
+# Significant gene pair correlation in concordant direction
+
+## Train organoid models
+
+```{r}
+# Get selected genes
+pos_concordant <- df_select %>% filter(os_tissues_coef > 0 & gene_drug_corr_estimate > 0)
+neg_concordant <- df_select %>% filter(os_tissues_coef < 0 & gene_drug_corr_estimate < 0)
+
+selected_genes <- c(pos_concordant$gene, neg_concordant$gene)
+
+# RF model
+rf1 <- fit_rf(gene_select = selected_genes,
+             exp = exp_list$exp,
+             y = exp_list$clinical$mIC50,
+             mode = "VIMP",
+             seed = 954)
+
+
+# Ridge regression
+set.seed(954)
+ridge <- fit_ridge(
+  gene_select = selected_genes,
+   exp = exp_list$exp,
+   y = exp_list$clinical$mIC50,
+)
+
+# Ensemble
+set.seed(954)
+ridge2 <- fit_ridge(
+  gene_select = gsub("[.]", "-", colnames(rf1$xvar)),
+   exp = exp_list$exp,
+   y = exp_list$clinical$mIC50,
+  a = 0
+)
+```
+
+```{r}
+results <- plyr::ldply(
+  test_GEO,
+  .fun = function(geo){
+    
+    cat("Testing GEO: ", geo, "\n")
+    # Prepare testing df
+    test_ls <- prepare_test_df(geo)
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge1_results <- prepare_results(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls
+    )
+
+    ## Ensemble
+    cat("Ridge Test\n")
+    ridge2_results <- prepare_results(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls
+    )
+    
+    ## RF test
+    cat("RF1 Test\n")
+    rf1_results <- prepare_results(
+      model = "RF",
+      mod = rf1,
+      test_list = test_ls
+    )
+
+    results_df <- rbind(
+      ridge1_results, ridge2_results, rf2_results
+    ) %>% 
+      mutate(Model = c("ridge","ensemble","RF"),
+             GEO = geo,
+             gene_select_criteria = "Three association test",
+             .before = 1)
+    
+    return(results_df)
+  }
+)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+
+
+

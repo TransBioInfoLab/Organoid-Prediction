@@ -1,0 +1,289 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "GSE171682"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: true
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE)
+
+dir.base <- "../../../"
+# Create and retrieve dir
+GEO <- "GSE171682"
+dir.data <- file.path(dir.base, "data/", GEO)
+dir.data.raw <- file.path(dir.data, "raw")
+dir.data.processed <- file.path(dir.data, "processed")
+dir.data.clinical <- file.path(dir.data, "clinical")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+dir.results.cox <- file.path(dir.results, "cox_reg/", GEO)
+dir.results.corr <- file.path(dir.results, "corr/")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Data preprocessing
+
+## Data download and get expression data
+
+```{r eval = F}
+ges <- getGEO(GEO = "GSE171682", destdir = dir.data.raw)
+
+# Gene expression profile of colorectal cancer tissues from 87 patients
+GSE171680 <- getGEO(GEO = "GSE171680", destdir = dir.data.raw)
+
+# Gene expression profiles of colorectal cancer organoids from 87 patients
+GSE171681 <- getGEO(GEO = "GSE171681", destdir = dir.data.raw)
+```
+
+
+## Get phenotype
+
+```{r eval = F}
+# Colorectal cancer tissues
+id_sample_tiss <- pData(GSE171680[[1]]) %>% 
+  clean_names() %>% # clean column names
+  separate_wider_delim(title, delim = ", ", names = c("exp_type", "sample_id")) %>% 
+  mutate(tissues_geo = geo_accession) %>%
+  dplyr::select(tissues_geo, sample_id)
+  # extract GEO sample id
+
+# Colorectal cancer organoids
+id_sample_org <- pData(GSE171681[[1]]) %>% 
+  clean_names() %>% # clean column names
+  separate_wider_delim(title, delim = ", ", names = c("exp_type", "sample_id")) %>% 
+  mutate(organoids_geo = geo_accession) %>%
+  dplyr::select(organoids_geo, sample_id)
+  # extract GEO sample id
+
+# Characteristics of patients in supplementary file
+pheno <- readxl::read_xlsx(
+  file.path(dir.data.raw, "13046_2021_2034_MOESM1_ESM.xlsx"),
+  skip = 1
+) %>% clean_names()
+
+# Add GEO ID to pheno data
+pheno <- left_join(pheno, full_join(
+  id_sample_tiss, id_sample_org
+))
+```
+
+```{r eval = F}
+# Save clinical data
+write_csv(
+  pheno,
+  file.path(dir.data.clinical, "GSE171682_colorectal_cancer_clinical_data.csv")
+)
+```
+
+## Get expression data
+
+```{r message = F, eval = F}
+# Gene expression of colorectal cancer from 87 patients
+# Get RNA-Seq for tissues and organoids
+geo_list <- c("GSE171680", "GSE171681")
+exp_list <- geo_list %>% 
+  purrr::map(~get_exp(.)) 
+names(exp_list) <- geo_list # set name
+```
+
+```{r eval = F}
+# Save expression data
+save(
+  exp_list,
+  file = file.path(dir.data.processed, "GSE171682_colorectal_cancer_raw_exp_data_all.RDS")
+)
+```
+
+## Preprocessing
+
+```{r eval = F}
+# Remove all 0s
+exp_filtered_list <- exp_list %>% 
+  purrr::map(~gene_filtered(.)) 
+```
+
+```{r eval = F}
+# Save filtered expression data
+save(
+  exp_filtered_list,
+  file = file.path(dir.data.processed, "GSE171682_colorectal_cancer_exp_data_all_removed_0s.RDS")
+)
+```
+
+```{r eval = F}
+# Get common genes
+common_genes <- intersect(
+  rownames(exp_filtered_list$GSE171680), 
+  rownames(exp_filtered_list$GSE171681)
+)
+exp_filtered_list <- exp_filtered_list %>% purrr::map(~.[common_genes,])
+```
+
+```{r eval = F}
+# Save filtered expression data
+save(
+  exp_filtered_list,
+  file = file.path(dir.data.processed, "GSE171682_colorectal_cancer_exp_data_common_genes.RDS")
+)
+```
+
+# Analysis
+
+```{r}
+load(file = file.path(dir.data.processed, "GSE171682_colorectal_cancer_exp_data_common_genes.RDS"))
+```
+
+```{r message = F}
+pheno <- readr::read_csv(
+  file.path(dir.data.clinical, "GSE171682_colorectal_cancer_clinical_data.csv")
+)
+```
+
+## Cox regression
+
+```{r}
+# Prepare survival data
+pheno <- pheno %>% 
+  mutate(sex = factor(sex),
+         tim_class = factor(tim_class),
+         os_month = os_day/30,
+         rfs_month = rfs_day/30)
+```
+
+### RFS results
+
+```{r eval = F}
+# Fit cox regression and get coefficient
+cox_coef_list <- exp_filtered_list %>% 
+  purrr::map(~cox_coef(., 
+                       pheno = pheno, 
+                       time_var = "rfs_month",
+                       event_var = "recur",
+                       adjust_var = c("age", "sex")))
+                       # adjust for age, sex and tim_class
+
+# Add FDR
+cox_coef_list <- cox_coef_list %>%
+  purrr::map(~add_fdr(.))
+```
+
+```{r eval = F}
+# Rename columns
+tissue_cox_results <- cox_coef_list$GSE171680 %>% 
+  rename_with(.fn = function(x) paste0("tissues_", x), .col = !contains("gene"))
+organoids_cox_results <- cox_coef_list$GSE171681 %>% 
+  rename_with(.fn = function(x) paste0("organoids_", x), .col = !contains("gene"))
+
+# Combinen results
+cox_results <- full_join(
+  tissue_cox_results, organoids_cox_results
+)
+```
+
+```{r eval = F}
+# # Remove genes that are not converged in cox regression
+# cox_results <- cox_results %>% 
+#   filter(tissues_warning == F & organoids_warning == F)
+# cox_results$tissues_warning <- NULL
+# cox_results$organoids_warning <- NULL
+cox_results <- cox_results[order(cox_results$tissues_pr_z),]
+```
+
+```{r eval = F}
+# Save results
+write_csv(
+  cox_results,
+  file.path(dir.results.cox, "GSE171682_colorectal_cancer_gene_cox_regression_rfs.csv")
+)
+```
+
+### OS results
+
+```{r eval = F}
+# Fit cox regression and get coefficient
+cox_coef_list <- exp_filtered_list %>% 
+  purrr::map(~cox_coef(., 
+                       pheno = pheno, 
+                       time_var = "os_month",
+                       event_var = "death",
+                       adjust_var = c("age", "sex"),
+                       parallel = T))
+                       # adjust for age, sex
+
+# Add FDR
+cox_coef_list <- cox_coef_list %>%
+  purrr::map(~add_fdr(.))
+```
+
+```{r eval = F}
+# Rename columns
+tissue_cox_results <- cox_coef_list$GSE171680 %>% 
+  rename_with(.fn = function(x) paste0("tissues_", x), .col = !contains("gene"))
+organoids_cox_results <- cox_coef_list$GSE171681 %>% 
+  rename_with(.fn = function(x) paste0("organoids_", x), .col = !contains("gene"))
+
+# Combinen results
+cox_results <- full_join(
+  tissue_cox_results, organoids_cox_results
+)
+```
+
+```{r eval = F}
+cox_results <- cox_results[order(cox_results$tissues_pr_z),]
+```
+
+```{r eval = F}
+# Save results
+write_csv(
+  cox_results,
+  file.path(dir.results.cox, "GSE171682_colorectal_cancer_gene_cox_regression_os.csv")
+)
+```
+
+## Spearman correlation 
+
+```{r}
+# Calculate gene-pair correlation
+results <- corr_coef_gene(exp1 = exp_filtered_list$GSE171680, 
+                          exp2 = exp_filtered_list$GSE171681)
+
+results$fdr <- p.adjust(results$p_value, method = "fdr")
+```
+
+```{r eval = F}
+# Save results
+readr::write_csv(
+  results,
+  file.path(dir.results.corr, "GSE171682_colorectal_cancer_gene_spearman_corr.csv")
+)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+

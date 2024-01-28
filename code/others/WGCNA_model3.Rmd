@@ -1,0 +1,432 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "WGCNA --- Model 3"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE, message = F)
+
+dir.base <- "../../"
+# Create and retrieve dir
+dir.data <- file.path(dir.base, "data/")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+dir.results.wgcna <- file.path(dir.results, "WGCNA/")
+dir.results.test <- file.path(dir.results, "test/")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Load data
+
+```{r}
+exp_list <- prepare_single_train_df("GSE64392")
+```
+
+```{r}
+# Creat exp set
+expSet <- list(
+  GSE64392 = list(data = scale(t(exp_list$exp)))
+)
+checkSets(expSet)
+```
+
+# WGCNA
+
+```{r eval = F}
+powers <- c(seq(1,20,by=1))
+power_df <- pickSoftThreshold(expSet$GSE64392$data,
+                      powerVector = powers,
+                      verbose = 2,
+                      networkType = "signed")
+```
+
+```{r eval = F}
+modules <- blockwiseModules(
+  datExpr = expSet$GSE64392$data,
+  power = power_df$powerEstimate, 
+  networkType = "signed",
+  TOMType = "signed",
+  detectCutHeight = 0.999,
+  minModuleSize = 30,
+  saveConsensusTOMs = F
+)
+```
+
+# Identification of key module
+
+## Find eigen modules that most related to outcome
+
+```{r}
+# Match samples
+GSE64392_ME <- modules$MEs
+```
+
+```{r}
+corr_results <- corr_coef(t(GSE64392_ME),
+                          exp_list$clinical,
+                          drug_var = "mIC50",
+                          parallel = F, 
+                          method = "spearman")
+```
+
+```{r}
+corr_results %>% arrange(p.value)
+```
+
+MEgrey60, MEcoral2
+
+## Select hub genes with consensus kME
+
+### Calculate consensus kME
+
+```{r}
+kME <- signedKME(
+  datExpr = expSet$GSE64392$data,
+  datME = modules$MEs
+)
+```
+
+```{r eval = F}
+# Save WGCNA modules and hub genes
+save(
+  modules,
+  kME,
+  corr_results,
+  file = file.path(dir.results.wgcna,"WGCNA_GSE64392_results.rda")
+)
+```
+
+## Calculate consensus kME
+
+```{r}
+load(file.path(dir.results.wgcna,"WGCNA_GSE64392_results.rda"))
+```
+
+```{r}
+module_wo_grey <- modules$colors[!modules$colors %in% "grey"]
+table(module_wo_grey)
+```
+
+# Select hub genes in key modules
+
+criteria
+
+1) MM > 0.5
+
+```{r}
+drug_corr <- read.csv(
+  file.path(dir.results.corr, "GSE64392_gene_drug_sp_corr.csv")
+)
+```
+
+```{r}
+hub_gene_in_modules_drug <- get_top_genes_in_module(
+ module_wo_grey, kME, 
+ thres_kME = 0.5,
+ consensus = F
+)
+hub_gene_in_modules_drug <- hub_gene_in_modules_drug[hub_gene_in_modules_drug %>% 
+                       purrr::map(~nrow(.) > 1) %>% 
+                       unlist()]
+```
+
+```{r eval = F}
+save(
+  hub_gene_in_modules_drug,
+  file = file.path(dir.results.wgcna, "WGCNA_key_modules_GSE64392_pairs.rda")
+)
+```
+
+```{r}
+load(file.path(dir.results.wgcna, "WGCNA_key_modules_GSE64392_pairs.rda"))
+```
+
+# Train organoid models
+
+```{r}
+# Prepare training
+train_ls <- prepare_train_df()
+results_ls <- data.frame()
+```
+
+```{r}
+test_GEO <- c(
+  "GSE39582",
+  "GSE17538",
+  "COAD", #TCGA
+  "GSE106584",
+  "GSE72970",
+  "GSE87211"
+)
+```
+
+```{r}
+# Get selected genes
+selected_modules <- hub_gene_in_modules_drug[names(hub_gene_in_modules_drug) %in% 
+                                               c("coral2", "grey60", "lightpink4", "lightyellow", "darkgreen", "darkred", "green")]
+selected_genes <- Reduce(rbind,selected_modules)$ID
+
+# RF model
+rf2 <- fit_rf(gene_select = selected_genes,
+             exp = exp_list$exp,
+             y = exp_list$clinical$mIC50,
+             mode = "VIMP",
+             seed = 954)
+
+# Ridge regression
+set.seed(950)
+ridge <- fit_ridge(
+  gene_select = selected_genes,
+  exp = exp_list$exp,
+             y = exp_list$clinical$mIC50
+)
+
+# Ensemble
+set.seed(952)
+ridge2 <- fit_ridge(
+  gene_select = gsub("[.]", "-", colnames(rf2$xvar)),
+  exp = exp_list$exp,
+  y = exp_list$clinical$mIC50,
+  a = 0
+)
+```
+
+
+## Test model
+
+
+```{r}
+results <- plyr::ldply(
+  test_GEO,
+  .fun = function(geo){
+    
+    cat("Testing GEO: ", geo, "\n")
+    # Prepare testing df
+    test_ls <- prepare_test_df(geo)
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge1_results <- prepare_results(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls
+    )
+    
+    # Ensemble
+    cat("Ridge Test\n")
+    ridge2_results <- prepare_results(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls
+    )
+
+    cat("RF2 Test\n")
+    rf2_results <- prepare_results(
+      model = "RF",
+      mod = rf2,
+      test_list = test_ls
+    )
+
+    results_df <- rbind(
+      ridge1_results, ridge2_results, rf2_results
+    ) %>% 
+      mutate(Model = c("ridge","ensemble","RF"),
+             GEO = geo,
+             gene_select_criteria = "Most variable GSE WGCNA coral + grey60",
+             .before = 1)
+    
+    return(results_df)
+  }
+)
+
+results$num_gene_total <- length(selected_genes)
+```
+
+
+```{r}
+writexl::write_xlsx(
+  results,
+  file.path(dir.results.test,
+            "Test_results_for_WGCNA_GSE64392.xlsx")
+)
+```
+
+
+```{r}
+cv_test <- function(k = 5){
+  k_fold <- caret::createFolds(
+    1:ncol(train_ls$exp),
+    k
+  )
+  cv_df <- plyr::ldply(
+    k_fold,
+    .fun = function(k){
+      train <- exp_list$exp[,-k]
+      test <- exp_list$exp[,k]
+      
+      r1 <- fit_rf(gene_select = gsub("[.]", "-", colnames(rf2$xvar)),
+               exp = train,
+               y = exp_list$clinical$mIC50[-k],
+               mode = "None",
+               seed = NULL)
+      
+      t1 <- predict(r1, data.frame(scale(t(test))))
+      t1 <- mean((t1$predicted -exp_list$clinical$mIC50[k])^2)
+  
+    
+      data.frame(
+        "RF_select" = t1
+      )
+    }, .id = NULL
+  )
+
+  r <- fit_ridge(
+    gene_select = names(ridge$coeff),
+    exp = exp_list$exp,
+    y = exp_list$clinical$mIC50,
+    a = 0,
+    k = k
+  )
+  
+  r2 <- fit_ridge(
+    gene_select = gsub("[.]", "-", colnames(rf2$xvar)),
+    exp = exp_list$exp,
+    y = exp_list$clinical$mIC50,
+    a = 0,
+    k = k
+  )
+
+  cv_df <- colMeans(cv_df)
+
+  data.frame(
+    RF_select = as.numeric(cv_df[1]),
+    Ridge_full = r$cv_min,
+    Ridge_RF = r2$cv_min)
+
+}
+```
+
+
+```{r}
+cv_ten <- plyr::ldply(1:100, .fun=function(i) cv_test(k = 3))
+```
+
+```{r}
+df <- tidyr::pivot_longer(cv_ten,cols = everything())
+
+df <- mutate(df, name = ifelse(
+  name == "RF_select", "RF",
+  ifelse(name == "Ridge_full", "Ridge", "Ensemble"
+  )
+))
+df$name <- factor(df$name, levels = c("RF", "Ridge", "Ensemble"))
+df_summ <- dplyr::summarise(df, mean = mean(value), .by = "name")
+```
+
+```{r}
+stat.test <- df %>% t_test (value ~ name, paired = F,
+                           comparisons = list(c( "Ensemble", "Ridge"),
+                             c("Ensemble", "RF") ),
+                           alternative = "greater") %>% 
+  add_xy_position(x = "name")
+```
+
+
+```{r}
+g1 <- ggboxplot(df,
+          x = "name", 
+          y = "value",
+          fill = "name",
+          palette = "jco",
+          ylab = "CV errors",
+          xlab = "Organoid models",
+          bxp.errorbar = T,
+          error.plot = "errorbar",
+          ggtheme = theme_bw(),
+          title = "Model 3") + 
+  guides(fill = "none") +
+  stat_summary(fun.data = function(x){
+    data.frame(y=2.5, label = paste("Mean:",round(mean(x),2)))
+  } , geom="text") + 
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01)
+```
+
+
+```{r}
+ggsave(file.path(dir.results.plot, "Validate_wgcna_model3_cv_plot.pdf"),
+       g1,
+       width = 4.5,
+       height = 4)
+```
+
+```{r}
+plot_List <- plyr::llply(
+  test_GEO,
+  .fun = function(geo){
+    test_ls <- prepare_test_df(geo)
+    if(geo == "COAD") geo <- "TCGA-COAD"
+    prepare_KMplot(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls,
+      save = F,
+      dir_save = dir.results.plots,
+      prefix = "group",
+      prefix2 = geo,
+      title = geo
+    ) 
+  }
+)
+
+```
+
+```{r}
+pdf(file.path(dir.results.plot, "KM_WGCNA_model3_test.pdf"),
+       width = 12,
+       height = 20)
+arrange_ggsurvplots(plot_List, print = TRUE,
+  ncol = 2, nrow = 3, risk.table.height = 0.2)
+dev.off()
+```
+
+```{r}
+writexl::write_xlsx(
+  results,
+  file.path(dir.results.test,
+            "Test_results_for_WGCNA_GSE171682_all_samples.xlsx")
+)
+```
+
+
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+

@@ -1,0 +1,133 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "GSE106584"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE)
+
+dir.base <- "../../../"
+# Create and retrieve dir
+GEO <- "GSE106584"
+dir.data <- file.path(dir.base, "data/", GEO)
+dir.data.raw <- file.path(dir.data, "raw")
+dir.data.processed <- file.path(dir.data, "processed")
+dir.data.clinical <- file.path(dir.data, "clinical")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Data preprocessing
+
+## Data download and get expression data
+
+```{r eval = F}
+GSE106584 <- getGEO(GEO = "GSE106584", destdir = dir.data.raw)
+```
+
+```{r}
+# Get phenotype
+pheno_GSE106584 <- pData(GSE106584$GSE106584_series_matrix.txt.gz) %>%
+  clean_names()
+
+write_csv(
+  pheno_GSE106584,
+  file.path(dir.data.clinical, "GSE106584_clinical_data.csv")
+)
+```
+
+## Get expression data
+
+```{r}
+exp <- exprs(GSE106584$GSE106584_series_matrix.txt.gz)
+
+#### use probe with largest IDR to represent the gene
+arrayIQR <- apply(exp,1,IQR)
+probe <- rownames(exp)
+uniqueGenes <- findLargest(as.vector(probe),arrayIQR,'hta20transcriptcluster')
+
+# Add gene symbol
+exp2 <- exp[uniqueGenes,] 
+gene_symbol <- AnnotationDbi::select(hta20transcriptcluster.db, 
+                      keys = uniqueGenes, 
+                      columns ="SYMBOL")
+rownames(exp2) <- gene_symbol$SYMBOL
+```
+
+```{r}
+# Save raw expression data
+write_csv(
+  exp2 %>% data.frame() %>% rownames_to_column("Gene"),
+  file.path(dir.data.processed, paste0(GEO, "_raw_exp_data.csv"))
+)
+```
+
+## Preprocessing clinical data
+
+```{r}
+clinical <- pheno_GSE106584
+
+# remove samples with NA in dfs
+clinical <- clinical %>%
+  mutate(os = as.numeric(death_ch1),
+         os_month = as.numeric(overall_survival_days_ch1)/30,
+         rfs = as.numeric(recurrence_ch1),
+         rfs_month = as.numeric(disease_free_survival_days_ch1)/30)
+
+write_csv(
+  clinical,
+  file.path(dir.data.clinical, "GSE106584_clinical_with_rfs.csv")
+)
+```
+
+## Match with expression data
+
+```{r}
+exp2 <- exp2[,clinical$geo_accession]
+
+write_csv(
+  exp2 %>% data.frame() %>% rownames_to_column("Gene"),
+  file.path(dir.data.processed, paste0(GEO, "_rfs_exp_data.csv"))
+)
+```
+
+```{r}
+save(
+  exp2,
+  clinical,
+  file = file.path(dir.data.processed, "GSE106584_with_rfs_exp_clinical_data.rda")
+)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+

@@ -1,0 +1,277 @@
+---
+title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
+subtitle: "WGCNA --- Model 1"
+author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    highlight: pygments
+    theme: yeti
+    toc: true
+    number_sections: true
+    df_print: paged
+    code_download: false
+    toc_float:
+      collapsed: yes
+    toc_depth: 3
+editor_options:
+  chunk_output_type: inline    
+---
+
+```{r setup, include=FALSE}
+# Initial settings
+knitr::opts_chunk$set(echo = TRUE, message = F)
+
+dir.base <- "../../"
+# Create and retrieve dir
+dir.data <- file.path(dir.base, "data/")
+
+# Create results dir
+dir.results <- file.path(dir.base, "analysis-results/")
+dir.results.wgcna <- file.path(dir.results, "WGCNA/")
+dir.results.test <- file.path(dir.results, "test/")
+for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
+```
+
+# Auxillary function
+
+```{r message = F}
+fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+for (f in fn_ls) source(f)
+```
+
+# Load data
+
+```{r}
+exp_list <- prepare_single_train_df("GSE171682")
+```
+
+```{r}
+# Creat exp set
+expSet <- list(
+  GSE171680 = list(data = scale(t(exp_list$exp$GSE171680)))
+)
+checkSets(expSet)
+```
+
+# WGCNA
+
+```{r eval = F}
+powers <- c(seq(1,20,by=1))
+power_df <- pickSoftThreshold(expSet$GSE171680$data,
+                      powerVector = powers,
+                      verbose = 2,
+                      networkType = "signed")
+```
+
+```{r eval = F}
+modules <- blockwiseModules(
+  datExpr = expSet$GSE171680$data,
+  power = power_df$powerEstimate, 
+  networkType = "signed",
+  TOMType = "signed",
+  detectCutHeight = 0.999,
+  minModuleSize = 30,
+  saveConsensusTOMs = F
+)
+```
+
+# Identification of key module
+
+## Find eigen modules that most related to outcome
+
+```{r}
+# Prepare survival data
+GSE171682c <- exp_list$clinical
+```
+
+```{r}
+cox_results <- cox_coef(modules$MEs %>% t(),
+                        GSE171682c,
+                        time_var = "rfs_month",
+                        event_var = "recur")
+```
+
+```{r}
+cox_results %>% arrange(pr_z)
+```
+
+tan, brown, darkgreen, red, royalblue, lightgreen, orange, darkgreen
+
+```{r}
+cox_results_os <- cox_coef(modules$MEs %>% t(),
+                        GSE171682c,
+                        time_var = "os_month",
+                        event_var = "death")
+```
+
+```{r}
+cox_results_os %>% arrange(pr_z)
+```
+
+orange, tan, darkgrey
+
+## Calculate consensus kME
+
+```{r}
+kME <- signedKME(
+  datExpr = expSet$GSE171680$data,
+  datME = modules$MEs
+)
+```
+
+```{r eval = F}
+# Save WGCNA modules and hub genes
+save(
+  modules,
+  kME,
+  cox_results,
+  cox_results_os,
+  file = file.path(dir.results.wgcna,"WGCNA_GSE171680_results.rda")
+)
+```
+
+# Select hub genes in key modules
+
+```{r}
+load(file.path(dir.results.wgcna,"WGCNA_GSE171680_results.rda"))
+```
+
+```{r}
+module_wo_grey <- modules$colors[!modules$colors %in% "grey"]
+table(module_wo_grey)
+```
+
+criteria
+
+1) MM > 0.5
+3) ME p value < 0.05 in os or rfs outcome
+
+```{r }
+hub_gene_in_modules_drug <- get_top_genes_in_module(
+ module_wo_grey, kME,
+ consensus = F
+)
+hub_gene_in_modules_drug <- hub_gene_in_modules_drug[hub_gene_in_modules_drug %>% 
+                       purrr::map(~nrow(.) > 1) %>% 
+                       unlist()]
+```
+
+```{r eval = F}
+save(
+  hub_gene_in_modules_drug,
+  file = file.path(dir.results.wgcna, "WGCNA_key_modules_GSE171680_pairs.rda")
+)
+```
+
+```{r}
+load(file.path(dir.results.wgcna, "WGCNA_key_modules_GSE171680_pairs.rda"))
+```
+
+# Train organoid models
+
+```{r}
+test_GEO <- c(
+  "GSE39582",
+  "GSE17538",
+  "COAD", #TCGA
+  "GSE106584",
+  "GSE72970",
+  "GSE87211"
+)
+```
+
+```{r}
+# Get selected genes
+selected_modules <- hub_gene_in_modules_drug[names(hub_gene_in_modules_drug) %in% c("tan", "orange", "darkgrey")]
+selected_genes <- Reduce(rbind,selected_modules)$ID
+
+# RF model
+rf2 <- fit_rf(gene_select = selected_genes,
+             exp = exp_list$exp$GSE171680,
+             y = data.frame(os_month = exp_list$clinical$os_month, 
+                            death = exp_list$clinical$death),
+             mode = "VIMP",
+             seed = 954,
+             type = "survival")
+
+# Ridge regression
+set.seed(950)
+ridge <- fit_ridge(
+  gene_select = selected_genes,
+  exp = exp_list$exp$GSE171680,
+  y = Surv(time = exp_list$clinical$os_month, event = exp_list$clinical$death),
+  type = "survival",
+  family = "cox",
+  type.measure = "C"
+)
+
+# Ensemble
+set.seed(952)
+ridge2 <- fit_ridge(
+  gene_select = colnames(rf2$xvar),
+  exp = exp_list$exp$GSE171680,
+  y = Surv(time = exp_list$clinical$os_month, event = exp_list$clinical$death),
+  a = 0,
+  type = "survival",
+  family = "cox",
+  type.measure = "C"
+)
+```
+
+## Test model
+
+```{r}
+results <- plyr::ldply(
+  test_GEO,
+  .fun = function(geo){
+    
+    cat("Testing GEO: ", geo, "\n")
+    # Prepare testing df
+    test_ls <- prepare_test_df(geo)
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge1_results <- prepare_results(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls
+    )
+    
+    ## Ensemble
+    cat("Ridge Test\n")
+    ridge2_results <- prepare_results(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls
+    )
+
+    cat("RF2 Test\n")
+    rf2_results <- prepare_results(
+      model = "RF",
+      mod = rf2,
+      test_list = test_ls
+    )
+
+    results_df <- rbind(
+      ridge1_results, ridge2_results, rf2_results
+    ) %>% 
+      mutate(Model = c("ridge","ensemble","RF"),
+             GEO = geo,
+             gene_select_criteria = "Most variable GSE171680 WGCNA tan + orange + darkgrey",
+             .before = 1)
+    
+    return(results_df)
+  }
+)
+
+results$num_gene_total <- length(selected_genes)
+```
+
+# Session Information
+
+```{r}
+devtools::session_info()
+```
+
