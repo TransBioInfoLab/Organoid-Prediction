@@ -1,7 +1,7 @@
 ---
-title: "Enhancing Chemotherapy Response Prediction via Matched Colorectal Tumor-Organoid Gene Expression Analysis and Network-Based Biomarker Selection"
-subtitle: "Organoid model"
-author: "Wei Zhang, Hanchen Huang, Xi S.Chen"
+title: "WGCNA module test"
+subtitle: "Most variable genes"
+author: "Wei Zhang"
 date: "`r Sys.Date()`"
 output:
   rmarkdown::html_document:
@@ -28,22 +28,27 @@ dir.data <- file.path(dir.base, "data/")
 # Create results dir
 dir.results <- file.path(dir.base, "analysis-results/")
 dir.results.wgcna <- file.path(dir.results, "WGCNA/")
+dir.results.plots <- file.path(dir.results, "plots/KM/")
 dir.results.test <- file.path(dir.results, "test/")
 for(p in grep("dir",ls(),value = T)) dir.create(get(p),recursive = TRUE,showWarnings = FALSE)
 ```
 
-# Load auxillary function
+# Auxillary function
 
 ```{r message = F}
-fn_ls <- list.files("../utility/", pattern = ".R", full.names = T)
+fn_ls <- list.files(
+  "../utility/",
+  pattern = ".R",
+  full.names = T
+)
 for (f in fn_ls) source(f)
 ```
-
-# Load WGCNA results
 
 ```{r}
 load(file.path(dir.results.wgcna, "WGCNA_key_modules_corr_pairs.rda"))
 ```
+
+# Test
 
 ```{r}
 # Prepare training
@@ -51,18 +56,20 @@ train_ls <- prepare_train_df()
 results_ls <- data.frame()
 ```
 
+
 ```{r}
 test_GEO <- c(
   "GSE39582",
   "GSE17538",
   "COAD", #TCGA
+  "COAD+READ",
   "GSE106584",
   "GSE72970",
   "GSE87211"
 )
 ```
 
-## Train models
+
 
 ```{r}
 # Get selected genes
@@ -89,10 +96,10 @@ set.seed(954)
 ridge <- fit_ridge(
   gene_select = selected_genes,
   exp = train_ls$exp,
-  y = train_ls$mIC50
+  y = train_ls$mIC50,
+  a = 0
 )
 
-# Ensemble
 set.seed(954)
 ridge2 <- fit_ridge(
   gene_select = gsub("[.]", "-", colnames(rf1$xvar)),
@@ -100,6 +107,203 @@ ridge2 <- fit_ridge(
   y = train_ls$mIC50,
   a = 0
 )
+```
+
+```{r}
+writexl::write_xlsx(list(ensemble = data.frame(gene = gsub("[.]", "-", colnames(rf1$xvar)), 
+                                               coeff = ridge2$coeff),
+                         ridge = data.frame(gene = names(ridge$coeff), coeff = ridge$coeff)),
+                    path = file.path(dir.results.wgcna, "Model_selected_genes.xlsx"))
+```
+
+```{r}
+save(
+  rf1, rf2, ridge, ridge2,
+  file = file.path(dir.results.model, "organoid_model.rda")
+)
+```
+
+## CV of the model
+
+```{r}
+cv_test <- function(k = 5){
+  k_fold <- caret::createFolds(
+    1:ncol(train_ls$exp),
+    k
+  )
+  cv_df <- plyr::ldply(
+    k_fold,
+    .fun = function(k){
+      train <- train_ls$exp[,-k]
+      test <- train_ls$exp[,k]
+      
+      r1 <- fit_rf(gene_select = colnames(rf1$xvar),
+               exp = train,
+               y = train_ls$mIC50[-k],
+               mode = "None",
+               seed = NULL)
+      
+      t1 <- predict(r1, data.frame(scale(t(test))))
+      t1 <- mean((t1$predicted - train_ls$mIC50[k])^2)
+  
+      # RF model
+      r2 <- fit_rf(gene_select = selected_genes,
+                   exp = train,
+                   y = train_ls$mIC50[-k],
+                   mode = 'None',
+                   seed = NULL)
+      
+      t2 <- predict(r2, data.frame(scale(t(test))))
+      t2 <- mean((t2$predicted - train_ls$mIC50[k])^2)
+
+      data.frame(
+        "RF_select" = t1,
+        "RF_full" = t2
+      )
+    }, .id = NULL
+  )
+
+  ridge <- fit_ridge(
+    gene_select = selected_genes,
+    exp = train_ls$exp,
+    y = train_ls$mIC50,
+    a = 0,
+    k = k
+  )
+  
+  ridge2 <- fit_ridge(
+    gene_select = gsub("[.]", "-", colnames(rf1$xvar)),
+    exp = train_ls$exp,
+    y = train_ls$mIC50,
+    a = 0,
+    k = k
+  )
+
+  cv_df <- colMeans(cv_df)
+
+  data.frame(
+    RF_select = as.numeric(cv_df[1]),
+    RF_full = as.numeric(cv_df[2]),
+    Ridge_full = ridge$cv_min,
+    Ridge_RF = ridge2$cv_min)
+
+}
+```
+
+
+```{r}
+cv_ten <- plyr::ldply(1:100, .fun=function(i) cv_test(k = 3))
+```
+
+```{r}
+df <- tidyr::pivot_longer(cv_ten,cols = everything())
+df <- filter(df, !name %in% c("RF_full"))
+df <- mutate(df, name = ifelse(
+  name == "RF_select", "RF",
+  ifelse(name == "Ridge_full", "Ridge", "Ensemble"
+  )
+))
+df$name <- factor(df$name, levels = c("RF", "Ridge", "Ensemble"))
+df_summ <- dplyr::summarise(df, mean = mean(value), .by = "name")
+```
+
+```{r}
+stat.test <- df %>% t_test (value ~ name, paired = F,
+                           comparisons = list(c( "Ensemble", "Ridge"),
+                             c("Ensemble", "RF") ),
+                           alternative = "greater") %>% 
+  add_xy_position(x = "name")
+```
+
+
+```{r}
+g1 <- ggboxplot(df,
+          x = "name", 
+          y = "value",
+          fill = "name",
+          palette = "jco",
+          ylab = "CV errors",
+          xlab = "Organoid models",
+          bxp.errorbar = T,
+          error.plot = "errorbar",
+          ggtheme = theme_bw()) + 
+  guides(fill = "none") +
+  stat_summary(fun.data = function(x){
+    data.frame(y=3, label = paste("Mean:",round(mean(x),2)))
+  } , geom="text") + 
+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.01)
+```
+
+```{r}
+exp <- train_ls$exps_ls$GSE171680
+
+rf1_test <- predict(rf1, data.frame(scale(t(exp))))$predicted
+ridge1_test <- get_scores(test = exp, coef = ridge$coeff)
+ridge2_test <- get_scores(test = exp, coef = ridge2$coeff)
+```
+
+```{r}
+p1 <- pROC::roc( train_ls$survival$death, rf1_test, ci = T)
+p2 <- pROC::roc( train_ls$survival$death, ridge1_test, ci = T)
+p3 <- pROC::roc( train_ls$survival$death, ridge2_test, ci = T)
+```
+
+```{r}
+ls <- list(RF = p1, Ridge = p2, Ensemble = p3)
+names(ls) <- paste0(names(ls), " AUC: ", 
+                    c(paste0(round(p1$auc,3), " (", round(p1$ci[1],3), ",", round(p1$ci[3], 3),")"),
+                      paste0(round(p2$auc,3), " (", round(p2$ci[1],3), ",", round(p2$ci[3], 3),")"),
+                      paste0(round(p3$auc,3), " (", round(p3$ci[1],3), ",", round(p3$ci[3], 3),")")))
+g2 <- pROC::ggroc(
+  ls
+) + theme_bw() + 
+    geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), color="grey", linetype="dashed") +
+  scale_color_manual(values = ggpubr::get_palette("jco", 3)) + 
+  guides(color = guide_legend("Organoid models")) + 
+  theme(legend.position = c(0.8,0.1))
+```
+
+```{r}
+tr_ls <- list(exp = train_ls$exps_ls$GSE171680, clinical = train_ls$survival)
+tr_ls$clinical$os <- tr_ls$clinical$death
+g3 <- prepare_KMplot(
+      model = "RF",
+      mod = rf1,
+      test_list = tr_ls,
+      save = F,
+      prefix = "group",
+      prefix2 = ".",
+      title = "RF"
+    ) 
+g4 <- prepare_KMplot(
+      model = "ridge",
+      mod = ridge,
+      test_list = tr_ls,
+      save = F,
+      prefix = "group",
+      prefix2 = ".",
+      title = "Ridge"
+    ) 
+g5 <- prepare_KMplot(
+      model = "ridge",
+      mod = ridge2,
+      test_list = tr_ls,
+      save = F,
+      prefix = "group",
+      prefix2 = ".",
+      title = "Ensemble"
+    ) 
+```
+
+```{r}
+ggarrange(
+  ggarrange(g1,g2,ncol = 2),
+  ggarrange(g3$plot,g4$plot,g5$plot, ncol = 3), nrow = 2, heights = c(1,0.6)
+)
+
+ggsave(file.path(dir.results.plot, "Validate_wgcna_model_cv_roc_plot.pdf"),
+       width = 16,
+       height = 12)
 ```
 
 ## Test model
@@ -113,6 +317,7 @@ results <- plyr::ldply(
     # Prepare testing df
     test_ls <- prepare_test_df(geo)
     
+    # Test model
     ## Ridge
     cat("Ridge Test\n")
     ridge1_results <- prepare_results(
@@ -121,15 +326,16 @@ results <- plyr::ldply(
       test_list = test_ls
     )
     
-    ## Ensemble 
-    cat("Ensemble Test\n")
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
     ridge2_results <- prepare_results(
       model = "ridge",
       mod = ridge2,
       test_list = test_ls
     )
     
-    ## RF 
+    ## RF test
     cat("RF1 Test\n")
     rf1_results <- prepare_results(
       model = "RF",
@@ -147,7 +353,7 @@ results <- plyr::ldply(
     results_df <- rbind(
       ridge1_results, ridge2_results, rf1_results, rf2_results
     ) %>% 
-      mutate(Model = c("ridge","ensemble","RF1", "RF2"),
+      mutate(Model = c("ridge1","ridge2","RF1", "RF2"),
              GEO = geo,
              gene_select_criteria = "Most variable WGCNA tan and salmon",
              .before = 1)
@@ -158,5 +364,132 @@ results <- plyr::ldply(
 ```
 
 ```{r}
+writexl::write_xlsx(
+  results,
+  file.path(dir.results.test,
+            "Test_results_for_WGCNA_three_data.xlsx")
+)
+```
+
+
+```{r}
+plot_List <- plyr::llply(
+  test_GEO,
+  .fun = function(geo){
+    test_ls <- prepare_test_df(geo)
+    if(geo == "COAD") geo <- "TCGA-COAD"
+    prepare_KMplot(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls,
+      save = T,
+      dir_save = dir.results.plots,
+      prefix = "group",
+      prefix2 = geo,
+      title = geo
+    ) 
+  }
+)
+
+```
+
+```{r}
+pdf(file.path(dir.results.plot, "KM_WGCNA_main_test.pdf"),
+       width = 12,
+       height = 20)
+arrange_ggsurvplots(plot_List, print = TRUE,
+  ncol = 2, nrow = 3, risk.table.height = 0.2)
+dev.off()
+```
+
+
+```{r}
+plot_List <- plyr::llply(
+  test_GEO,
+  .fun = function(geo){
+    test_ls <- prepare_test_df(geo)
+    if(geo == "COAD") geo <- "TCGA-COAD"
+    prepare_KMplot(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls,
+      save = F,
+      dir_save = dir.results.plots,
+      prefix = "group",
+      prefix2 = geo,
+      title = geo
+    ) 
+  }
+)
+
+```
+
+```{r}
+pdf(file.path(dir.results.plot, "KM_WGCNA_main_test_35_genes.pdf"),
+       width = 12,
+       height = 20)
+arrange_ggsurvplots(plot_List, print = TRUE,
+  ncol = 2, nrow = 3, risk.table.height = 0.2)
+dev.off()
+```
+
+```{r}
+results <- plyr::ldply(
+  test_GEO,
+  .fun = function(geo){
+    
+    cat("Testing GEO: ", geo, "\n")
+    # Prepare testing df
+    test_ls <- prepare_test_df(geo, drug = F)
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge1_results <- prepare_results(
+      model = "ridge",
+      mod = ridge,
+      test_list = test_ls
+    )
+    
+    # Test model
+    ## Ridge
+    cat("Ridge Test\n")
+    ridge2_results <- prepare_results(
+      model = "ridge",
+      mod = ridge2,
+      test_list = test_ls
+    )
+    
+    ## RF test
+    cat("RF1 Test\n")
+    rf1_results <- prepare_results(
+      model = "RF",
+      mod = rf1,
+      test_list = test_ls
+    )
+    
+    cat("RF2 Test\n")
+    rf2_results <- prepare_results(
+      model = "RF",
+      mod = rf2,
+      test_list = test_ls
+    )
+
+    results_df <- rbind(
+      ridge1_results, ridge2_results, rf1_results, rf2_results
+    ) %>% 
+      mutate(Model = c("ridge1","ridge2","RF1", "RF2"),
+             GEO = geo,
+             gene_select_criteria = "Most variable WGCNA tan and salmon",
+             .before = 1)
+    
+    return(results_df)
+  }
+)
+```
+
+
+```{r}
 devtools::session_info()
 ```
+
